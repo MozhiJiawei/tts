@@ -1,4 +1,4 @@
-import time
+﻿import time
 from threading import Thread
 
 import librosa
@@ -31,7 +31,7 @@ class ScheduleEngine:
 
         self.llm_engine, llm_device = get_llm_config()
         if self.llm_engine == 'mindie_llm_manager':
-            # device???llm_manager_config.json??
+            # device 配置需要与 llm_manager_config.json 保持一致
             self.llm_manager = LlMManager(self.cfg.model.llm.llm_manager_path, self.token_pool)
         elif self.llm_engine == 'mindie_serivce':
             self.audio_llm = AudioLLM(self.cfg.model.llm.url)
@@ -102,7 +102,7 @@ class ScheduleEngine:
             ):
                 llm_input_ids = tts_infer.tokenize_text(target_texts, prompt_semantic_codes)
 
-            logger.info(f'??LLM?? stream_id: {stream_id}')
+            logger.info(f'开始 LLM 推理 stream_id: {stream_id}')
             with trace_span('llm.dispatch_backend', cat='llm', args=trace_args):
                 if self.llm_engine == 'mindie_llm_manager':
                     with trace_span('llm.mindie_manager_submit', cat='llm', args=trace_args):
@@ -217,7 +217,7 @@ class ScheduleEngine:
             batch_args = make_trace_args(stream_ids=stream_ids, batch_size=len(stream_ids))
             with trace_span('fm.batch_cycle', cat='fm', args=batch_args):
                 start_time = time.time()
-                logger.info(f'FM?? stream_ids: {stream_ids}')
+                logger.info(f'FM 开始处理 stream_ids: {stream_ids}')
 
                 with trace_span('fm.prepare_batch_inputs', cat='fm', args=batch_args):
                     batch_combine_batch_code = np.zeros((len(stream_ids), 25 + 2 + self.fm_min_token_cnt), dtype=np.int32)
@@ -228,7 +228,7 @@ class ScheduleEngine:
                         prompt_semantic_codes = infer_context['prompt_semantic_codes']
                         current_token_batch = fm_batch[idx]['tokens']
 
-                        # ?????????token
+                        # 首轮带上 prompt 语义 token，后续轮次再追加上一轮尾部 token
                         if infer_context['last_token_batch'] is None:
                             combine_batch_code = np.concatenate([prompt_semantic_codes, current_token_batch], axis=0)
                         else:
@@ -241,7 +241,7 @@ class ScheduleEngine:
 
                         current_mel = infer_context['prompt_mel_feats']
 
-                        # ??mel??
+                        # mel 条件同样保留上一轮尾部上下文，保证拼接连续性
                         if infer_context['last_mel'] is None:
                             mel_cond = current_mel
                         else:
@@ -249,7 +249,7 @@ class ScheduleEngine:
 
                         batch_mel_cond[idx, -len(mel_cond):] = mel_cond
 
-                logger.info(f'FM?batch ??: {time.time() - start_time} seconds')
+                logger.info(f'FM 准备 batch 耗时: {time.time() - start_time} seconds')
 
                 with trace_span(
                     'npu.flow_matching_infer',
@@ -265,7 +265,7 @@ class ScheduleEngine:
                         batch_token_cnt = fm['batch_token_cnt']
                         cur_audio = audio_list[idx][0]
                         slt_idx = int(actual_token_cnt / batch_token_cnt * len(cur_audio))
-                        logger.info(f'???? stream_id: {stream_id}, len: {len(cur_audio[:slt_idx])}')
+                        logger.info(f'输出音频片段 stream_id: {stream_id}, len: {len(cur_audio[:slt_idx])}')
                         result_queue_map[stream_id].put(cur_audio[:slt_idx])
                         trace_instant(
                             'fm.audio_emitted',
@@ -273,8 +273,8 @@ class ScheduleEngine:
                             args=make_trace_args(stream_id=stream_id, chunk_len=len(cur_audio[:slt_idx]), has_eos=fm['has_eos']),
                         )
                         if fm['has_eos']:
-                            # ??????token
-                            logger.info(f'stream_id: {stream_id} ????')
+                            # 当前流结束后清理上下文和 token 池状态
+                            logger.info(f'stream_id: {stream_id} 推理完成')
                             trace_instant('fm.stream_finalized', cat='fm', args=make_trace_args(stream_id=stream_id))
                             result_queue_map[stream_id].put(None)
                             del infer_context_pool[stream_id]

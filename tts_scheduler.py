@@ -1,4 +1,4 @@
-import concurrent
+﻿import concurrent
 from queue import Queue
 
 import numpy as np
@@ -20,7 +20,7 @@ class TtsScheduler:
         self.device = device
         bootstrap_tracing("voicebox-tts-scheduler")
 
-        # ????????1????0-20??
+        # 音量增益默认值为 1，合法范围限制在 0-20 之间
         self.volume_factor = 1 if self.cfg.postprocess.volume_factor is None else self.cfg.postprocess.volume_factor
         if self.volume_factor > 20:
             self.volume_factor = 20
@@ -67,13 +67,13 @@ class TtsScheduler:
             logger.info(f'tts scheduler put_request. sessionId: {session_id}, streamId: {stream_id}, targetText: {target_text}')
 
             with trace_span("tts.normalize_text", cat="tts", args=trace_args):
-                # ???
+                # 文本归一化
                 target_text = text_normalizer.process(target_text, target_lang)
                 prompt_text = text_normalizer.process(prompt_text, prompt_lang)
             logger.info(f'normalize result, target_text: {target_text}, prompt_text: {prompt_text}')
 
             with trace_span("tts.submit_llm", cat="tts", args=trace_args):
-                # LLM??
+                # 提交 LLM 推理
                 self.schedule_executor.submit(self.schedule_engine.run_llm, stream_id, target_text, prompt_text, prompt_audio)
 
             with trace_span("tts.create_result_queue", cat="tts", args=trace_args):
@@ -99,11 +99,11 @@ class TtsScheduler:
             yield audio
 
     def __pad_2d_list_left_numpy(self, lst, max_len, pad_value=0):
-        """?2D????????"""
+        """将二维列表左侧补齐后转换为 NumPy 数组。"""
 
-        # ??????
+        # 创建填充后的目标数组
         padded_array = np.full((len(lst), max_len), pad_value, dtype=type(lst[0][0]))
-        # ???????
+        # 从右侧对齐写入原始子列表
         for i, sublist in enumerate(lst):
             padded_array[i, -len(sublist):] = sublist
         return padded_array
