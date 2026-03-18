@@ -1,4 +1,4 @@
-"""
+﻿"""
 Chrome Tracing 打点工具
 
 用于在 Python 多线程/异步代码中打点，生成可在 Chrome 中查看的时间线。
@@ -81,6 +81,7 @@ class ChromeTracer:
         dur_us: Optional[int] = None,
         tid: Optional[int] = None,
         ts_us: Optional[int] = None,
+        extra: Optional[dict[str, Any]] = None,
     ) -> None:
         """发送一条 trace 事件。"""
         ts = self._ts_us() if ts_us is None else ts_us
@@ -96,6 +97,8 @@ class ChromeTracer:
             ev["args"] = args
         if dur_us is not None and ph == "X":
             ev["dur"] = dur_us
+        if extra:
+            ev.update(extra)
         with self._lock:
             self._events.append(ev)
             self._dirty = True
@@ -121,9 +124,16 @@ class ChromeTracer:
         """完整区间 (Phase X)，一条记录包含时长。"""
         self._emit("X", name, cat=cat, args=args, dur_us=dur_us, tid=tid, ts_us=ts_us)
 
-    def instant(self, name: str, cat: str = "", args: Optional[dict] = None, tid: Optional[int] = None) -> None:
+    def instant(
+        self,
+        name: str,
+        cat: str = "",
+        args: Optional[dict] = None,
+        tid: Optional[int] = None,
+        ts_us: Optional[int] = None,
+    ) -> None:
         """瞬时事件 (Phase i)。"""
-        self._emit("i", name, cat=cat, args=args, tid=tid)
+        self._emit("i", name, cat=cat, args=args, tid=tid, ts_us=ts_us)
 
     def metadata(self, name: str, args: dict, tid: Optional[int] = None) -> None:
         """元数据 (Phase M)，如 process_name、thread_name。"""
@@ -137,6 +147,46 @@ class ChromeTracer:
         """设置线程显示名称（在 chrome://tracing 中会显示）。"""
         # Chrome 通过事件的 tid 关联线程，args 只需 name
         self.metadata("thread_name", {"name": name}, tid=tid)
+
+    def set_thread_sort_index(self, sort_index: int, tid: Optional[int] = None) -> None:
+        """设置线程排序，便于同名逻辑泳道按固定顺序展示。"""
+        self.metadata("thread_sort_index", {"sort_index": sort_index}, tid=tid)
+
+    def flow_start(
+        self,
+        name: str,
+        flow_id: int,
+        cat: str = "",
+        args: Optional[dict] = None,
+        tid: Optional[int] = None,
+        ts_us: Optional[int] = None,
+    ) -> None:
+        """Flow 起点，用于把不同泳道上的事件关联起来。"""
+        self._emit("s", name, cat=cat, args=args, tid=tid, ts_us=ts_us, extra={"id": flow_id})
+
+    def flow_step(
+        self,
+        name: str,
+        flow_id: int,
+        cat: str = "",
+        args: Optional[dict] = None,
+        tid: Optional[int] = None,
+        ts_us: Optional[int] = None,
+    ) -> None:
+        """Flow 中继点。"""
+        self._emit("t", name, cat=cat, args=args, tid=tid, ts_us=ts_us, extra={"id": flow_id})
+
+    def flow_end(
+        self,
+        name: str,
+        flow_id: int,
+        cat: str = "",
+        args: Optional[dict] = None,
+        tid: Optional[int] = None,
+        ts_us: Optional[int] = None,
+    ) -> None:
+        """Flow 终点。"""
+        self._emit("f", name, cat=cat, args=args, tid=tid, ts_us=ts_us, extra={"id": flow_id})
 
     @contextmanager
     def span(self, name: str, cat: str = "", args: Optional[dict] = None, tid: Optional[int] = None):
@@ -262,6 +312,22 @@ def span(name: str, cat: str = "", args: Optional[dict] = None):
 
 def set_thread_name(name: str) -> None:
     get_tracer().set_thread_name(name)
+
+
+def set_thread_sort_index(sort_index: int, tid: Optional[int] = None) -> None:
+    get_tracer().set_thread_sort_index(sort_index, tid=tid)
+
+
+def flow_start(name: str, flow_id: int, cat: str = "", args: Optional[dict] = None) -> None:
+    get_tracer().flow_start(name, flow_id, cat=cat, args=args)
+
+
+def flow_step(name: str, flow_id: int, cat: str = "", args: Optional[dict] = None) -> None:
+    get_tracer().flow_step(name, flow_id, cat=cat, args=args)
+
+
+def flow_end(name: str, flow_id: int, cat: str = "", args: Optional[dict] = None) -> None:
+    get_tracer().flow_end(name, flow_id, cat=cat, args=args)
 
 
 def save_trace(path: str = "trace.json") -> None:

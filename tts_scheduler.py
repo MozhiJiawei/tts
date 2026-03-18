@@ -5,22 +5,15 @@ import numpy as np
 from src.util.logger import logger
 from src.inference.globals import text_normalizer, CFG, DEVICE, result_queue_map
 from src.schedule.schedule_engine import ScheduleEngine
-
-try:
-    from src.schedule.trace_utils import bootstrap_tracing, make_trace_args, trace_instant, trace_span, trace_thread_name
-except ImportError:
-    from trace_utils import bootstrap_tracing, make_trace_args, trace_instant, trace_span, trace_thread_name
-
-bootstrap_tracing("voicebox-tts-scheduler")
+from src.schedule.trace_utils import begin_request_lifecycle, end_request_lifecycle, make_trace_args
 
 
 class TtsScheduler:
     def __init__(self, cfg, device):
         self.cfg = cfg
         self.device = device
-        bootstrap_tracing("voicebox-tts-scheduler")
 
-        # 音量增益默认值为 1，合法范围限制在 0-20 之间
+        # Default volume gain is 1 and is clamped to the range [0, 20].
         self.volume_factor = 1 if self.cfg.postprocess.volume_factor is None else self.cfg.postprocess.volume_factor
         if self.volume_factor > 20:
             self.volume_factor = 20
@@ -41,15 +34,12 @@ class TtsScheduler:
             target_lang: str = "zh",
             prompt_lang: str = "en"
     ):
-        trace_thread_name("tts-request-thread")
-        request_args = make_trace_args(session_id=session_id, stream_id=stream_id)
-        with trace_span("tts.request.lifecycle", cat="tts", args=request_args):
-            self.put_request(session_id, stream_id, target_text, prompt_text,
-                             prompt_semantic_codes, prompt_audio_24k,
-                             target_lang, prompt_lang)
+        self.put_request(session_id, stream_id, target_text, prompt_text,
+                         prompt_semantic_codes, prompt_audio_24k,
+                         target_lang, prompt_lang)
 
-            for audio in self.wait_audio(stream_id):
-                yield audio
+        for audio in self.wait_audio(stream_id):
+            yield audio
 
     def put_request(
             self,
@@ -61,49 +51,56 @@ class TtsScheduler:
             target_lang: str = "zh",
             prompt_lang: str = "en"
     ):
-        trace_thread_name("tts-request-thread")
-        trace_args = make_trace_args(session_id=session_id, stream_id=stream_id)
-        with trace_span("tts.request.enqueue", cat="tts", args=trace_args):
-            logger.info(f'tts scheduler put_request. sessionId: {session_id}, streamId: {stream_id}, targetText: {target_text}')
+        logger.info(f'tts scheduler put_request. sessionId: {session_id}, streamId: {stream_id}, targetText: {target_text}')
+        trace_args = make_trace_args(
+            session_id=session_id,
+            target_lang=target_lang,
+            prompt_lang=prompt_lang,
+        )
+        begin_request_lifecycle(stream_id, args=trace_args)
 
-            with trace_span("tts.normalize_text", cat="tts", args=trace_args):
-                # 文本归一化
-                target_text = text_normalizer.process(target_text, target_lang)
-                prompt_text = text_normalizer.process(prompt_text, prompt_lang)
+        try:
+            # Normalize text before submitting the LLM job.
+            target_text = text_normalizer.process(target_text, target_lang)
+            prompt_text = text_normalizer.process(prompt_text, prompt_lang)
             logger.info(f'normalize result, target_text: {target_text}, prompt_text: {prompt_text}')
 
-            with trace_span("tts.submit_llm", cat="tts", args=trace_args):
-                # 提交 LLM 推理
-                self.schedule_executor.submit(self.schedule_engine.run_llm, stream_id, target_text, prompt_text, prompt_audio)
-
-            with trace_span("tts.create_result_queue", cat="tts", args=trace_args):
-                result_queue_map[stream_id] = Queue()
+            # Submit the LLM job and create the audio result queue.
+            self.schedule_executor.submit(self.schedule_engine.run_llm, stream_id, target_text, prompt_text, prompt_audio)
+            result_queue_map[stream_id] = Queue()
+        except Exception as exc:
+            end_request_lifecycle(
+                stream_id,
+                args=make_trace_args(trace_args, status="submit_failed", error=type(exc).__name__),
+            )
+            raise
 
     def wait_audio(self, stream_id: str):
-        trace_thread_name("tts-request-thread")
-        trace_args = make_trace_args(stream_id=stream_id)
-        while True:
-            with trace_span("tts.wait_audio_block", cat="tts", args=trace_args):
-                audio = result_queue_map[stream_id].get()
-            if audio is None:
-                trace_instant("tts.stream_complete", cat="tts", args=trace_args)
-                yield None
-                del result_queue_map[stream_id]
-                break
+        request_trace_closed = False
 
-            if self.volume_factor != 1:
-                with trace_span("tts.postprocess_volume", cat="tts", args=make_trace_args(trace_args, volume_factor=self.volume_factor)):
+        try:
+            while True:
+                audio = result_queue_map[stream_id].get()
+                if audio is None:
+                    end_request_lifecycle(stream_id, args={"status": "completed"})
+                    request_trace_closed = True
+                    del result_queue_map[stream_id]
+                    yield None
+                    break
+
+                if self.volume_factor != 1:
                     audio = audio * self.volume_factor
                     audio = np.clip(audio, -1.0, 1.0)
-            trace_instant("tts.audio_chunk_ready", cat="tts", args=make_trace_args(trace_args, chunk_len=len(audio)))
-            yield audio
+                yield audio
+        finally:
+            if not request_trace_closed:
+                end_request_lifecycle(stream_id, args={"status": "closed_early"})
 
     def __pad_2d_list_left_numpy(self, lst, max_len, pad_value=0):
-        """将二维列表左侧补齐后转换为 NumPy 数组。"""
+        """Left-pad a 2D list and convert it to a NumPy array."""
 
-        # 创建填充后的目标数组
+        # Build the target array and align each row on the right.
         padded_array = np.full((len(lst), max_len), pad_value, dtype=type(lst[0][0]))
-        # 从右侧对齐写入原始子列表
         for i, sublist in enumerate(lst):
             padded_array[i, -len(sublist):] = sublist
         return padded_array
